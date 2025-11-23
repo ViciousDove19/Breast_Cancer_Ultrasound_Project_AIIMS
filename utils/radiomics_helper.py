@@ -73,7 +73,7 @@ def robust_radiomics_extractor(config_dict):
     return extractor
 
 
-def extract_radiomic_features(img, mask, params):
+def extract_radiomic_features(img, mask, params=params):
     extractor = robust_radiomics_extractor(params)
 
     try:
