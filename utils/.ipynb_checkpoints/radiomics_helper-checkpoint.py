@@ -7,7 +7,6 @@ import SimpleITK as sitk
 import torch
 import radiomics
 from radiomics import featureextractor
-import os
 
 
 
@@ -85,25 +84,50 @@ def extract_radiomic_features(img, mask, params=params):
     except Exception as e:
         print(f"Error: {e}")
         return None
-    
-#function to build dataframe of radiomic features from image and mask directories
-    
-def build_radiomic_df(img_path, mask_path, params=params):
-    data = []
-    for file in os.listdir(img_path):
-        if file.endswith(('.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.tif')):
-            pre = file.split('.')[0]
-            mask = pre + '.png'  # Assuming mask has same name with .png extension
-            if os.path.exists(os.path.join(mask_path, mask)):
-                img = read_as_grayscale(os.path.join(img_path, file))
-                msk = read_as_grayscale(os.path.join(mask_path, mask))
-                features = extract_radiomic_features(img, msk, params)
-                if features:
-                    features['image_name'] = file
-                    data.append(features)
-    return pd.DataFrame(data)
 
 
 
 
+#function to segment manually
+
+def manual_mask_segmentation(image):
+    pts = []
+    drawing = [False]  # Using a mutable type to modify inside callback
+    image_copy = image.copy()
+
+    def draw_contour(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            drawing[0] = True
+            pts.append((x, y))
+            cv2.circle(image_copy, (x, y), 2, (0, 255, 0), -1)
+            cv2.imshow("Image", image_copy)
+        elif event == cv2.EVENT_MOUSEMOVE and drawing[0]:
+            pts.append((x, y))
+            cv2.line(image_copy, pts[-2], pts[-1], (0, 255, 0), 2)
+            cv2.imshow("Image", image_copy)
+        elif event == cv2.EVENT_LBUTTONUP:
+            drawing[0] = False
+
+    cv2.namedWindow("Image")
+    cv2.setMouseCallback("Image", draw_contour)
+
+    print("Draw the contour using left mouse button. Press 's' to finish and return the mask.")
+
+    while True:
+        cv2.imshow("Image", image_copy)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('s'):
+            break
+
+    if pts:
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        contour = np.array(pts, dtype=np.int32)
+        cv2.fillPoly(mask, [contour], 255)
+        cv2.imshow("Binary Mask", mask)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+        return mask
+    else:
+        cv2.destroyAllWindows()
+        return None
 
