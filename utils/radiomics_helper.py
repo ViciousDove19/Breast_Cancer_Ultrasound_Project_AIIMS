@@ -28,6 +28,20 @@ params['binWidth'] = 5          # With scale 100, this creates ~20 bins (good fo
 params['force2D'] = True        # Treat slice-by-slice (if you have a 3D volume)
 params['force2Ddimension'] = 0  # 0=Axial, usually correct for single US snapshots
 
+
+# **--- ADDED: ENABLE IMAGE FILTERS/DERIVED IMAGES ---**
+# These filter classes will automatically generate derived images
+# (e.g., Wavelet, LoG) and compute features on them.
+params['imageType'] = {
+    'Original': {},          # Features on the original image (must be included)
+    'Wavelet': {},           # Wavelet decomposition filters (e.g., LHH, HLH, HHH)
+    'LoG': {'sigma': [1.0, 2.0, 3.0]}, # Laplacian of Gaussian filters at different scales (sigma)
+    'Square': {},            # I = I^2
+    'SquareRoot': {},        # I = sqrt(I)
+    'Logarithm': {},         # I = log(I)
+    'Exponential': {}        # I = exp(I)
+}
+
 # Feature classes to enable
 params['featureClass'] = {
     'shape2D': None,           # VITAL for 2D US images
@@ -71,6 +85,10 @@ def robust_radiomics_extractor(config_dict):
     # Explicitly enable features
     for feat in ['shape2D', 'firstorder', 'glcm', 'glrlm', 'glszm', 'gldm', 'ngtdm']:
         extractor.enableFeatureClassByName(feat)
+    
+    for img_type in config_dict.get('imageType', {}).keys():
+        extractor.enableImageTypeByName(img_type)
+
     return extractor
 
 
@@ -93,10 +111,14 @@ def build_radiomic_df(img_path, mask_path, params=params):
     for file in os.listdir(img_path):
         if file.endswith(('.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.tif')):
             pre = file.split('.')[0]
+            print(pre)
             mask = pre + '.png'  # Assuming mask has same name with .png extension
+            print(mask)
             if os.path.exists(os.path.join(mask_path, mask)):
                 img = read_as_grayscale(os.path.join(img_path, file))
                 msk = read_as_grayscale(os.path.join(mask_path, mask))
+                img = sitk.GetImageFromArray(img)
+                msk = sitk.GetImageFromArray(msk)
                 features = extract_radiomic_features(img, msk, params)
                 if features:
                     features['image_name'] = file
