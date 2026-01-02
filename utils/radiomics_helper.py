@@ -55,30 +55,6 @@ params['featureClass'] = {
 }
 
 
-
-
-#Functions for image handling and display
-
-def read_as_grayscale(img_path):
-    # Read image with OpenCV in grayscale mode
-    img_cv = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-    if img_cv is None:
-        raise ValueError(f"Failed to read image from {img_path}")
-    img_cv = img_cv.astype(np.float32) / 255.0
-    return img_cv
-
-def reshape_to(img_to, img_from):
-    h,w = img_from.shape
-    return cv2.resize(img_to, (w, h), interpolation=cv2.INTER_LINEAR)
-
-def imdisp(img):
-    plt.imshow(img, cmap = 'gray')
-    plt.axis('off')
-    plt.show()
-
-
-
-
 # Function to extract radiomics features
 
 def robust_radiomics_extractor(config_dict):
