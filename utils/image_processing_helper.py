@@ -6,6 +6,12 @@ import io
 import os
 import json
 from PIL import Image
+from dotenv import load_dotenv
+import torch
+from diffusers import StableDiffusionInpaintPipeline
+from PIL import Image
+import numpy as np
+
 
 
 def read_as_grayscale(img_path):
@@ -133,30 +139,11 @@ def show_image_and_mask(image_path, mask_path, alpha=0.5, mask_color=(0, 0, 255)
     # Optionally return the overlay for further use
     return overlay
 
-
-# Configure your API key
-
-from dotenv import load_dotenv
-import os
-
 load_dotenv()
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
 def get_gemini_model(task_type="detection"):
-    """Returns the configured Gemini model."""
-    # Using Gemini 1.5 Flash for speed, or Pro for higher reasoning accuracy
-    if task_type == "localization":
-        # Use the 'Pro' model for high-precision spatial coordinates
-        # Try 'gemini-3-pro' or 'gemini-2.5-pro' depending on your API access
-        return genai.GenerativeModel('gemini-2.5-pro') 
-        
-    else:
-        # Use 'Flash' for fast, cheap binary classification
-        return genai.GenerativeModel('gemini-2.5-flash')
-
-# ==========================================
-# Task 1: Artifact Detection
-# ==========================================
+    return genai.GenerativeModel('gemini-2.5-flash')
 
 def detect_artifacts(image_path):
     """
@@ -195,105 +182,131 @@ def detect_artifacts(image_path):
         print(f"Error in detection: {e}")
         return 0
 
-# ==========================================
-# Task 2: Artifact Removal (Inpainting)
-# ==========================================
 
-def get_artifact_coordinates(image_path):
-    """
-    Asks Gemini to locate the artifacts and return bounding boxes.
-    """
-    model = get_gemini_model(task_type="localization")
-    img = Image.open(image_path)
-    
-    # Prompt to get precise coordinates in JSON format
-    prompt = """
-    Identify the bounding boxes for all artificial UI elements in this ultrasound image.
-    Target elements: Cross-hairs, text overlays, rulers, and colored (RGB) patches.
-    Ignore: The natural black background corners and the tissue itself.
-    
-    Return a JSON list of objects. Each object must have a 'box_2d' field with [ymin, xmin, ymax, xmax] coordinates.
-    The coordinates must be normalized (0 to 1).
-    
-    Example Output Format:
-    [
-      {"box_2d": [0.1, 0.2, 0.15, 0.3], "label": "crosshair"},
-      {"box_2d": [0.8, 0.8, 0.9, 0.9], "label": "text"}
-    ]
-    """
-    
-    # Set response MIME type to JSON for easier parsing
-    response = model.generate_content(
-        [prompt, img],
-        generation_config={"response_mime_type": "application/json"}
-    )
-    
-    return json.loads(response.text)
 
-def clean_ultrasound_image(image_path, output_path):
+def create_rect_mask(image_path):
     """
-    Pipeline: 
-    1. Check if artifacts exist (Task 1).
-    2. If yes, get coordinates from Gemini (Task 2a).
-    3. Use OpenCV to inpaint those specific regions (Task 2b).
+    Draw rectangles over crossmarks to create a binary mask.
+
+    Controls:
+    - Left click + drag: draw rectangle (region to inpaint, will be white in mask)
+    - 'u': undo last rectangle
+    - 'c': clear all rectangles
+    - 's': save mask and exit
+    - 'q' or ESC: quit without saving
     """
-    # Step 1: Check for artifacts
-    has_artifacts = detect_artifacts(image_path)
-    
-    if has_artifacts == 0:
-        print("Image is clean. No processing needed.")
-        # Save copy of original if needed, or just return
-        img = cv2.imread(image_path)
-        cv2.imwrite(output_path, img)
-        return
-
-    print("Artifacts detected. Proceeding to inpaint...")
-
-    # Step 2: Get coordinates from Gemini
-    # Note: Gemini 1.5 Pro is recommended here for better spatial reasoning
-    artifacts_data = get_artifact_coordinates(image_path)
-    
-    # Step 3: Processing with OpenCV
     img = cv2.imread(image_path)
-    mask = np.zeros(img.shape[:2], dtype=np.uint8)
+    if img is None:
+        raise FileNotFoundError(f"Could not read {image_path}")
+    img_disp = img.copy()
     h, w = img.shape[:2]
-    
-    found_boxes = False
-    
-    for item in artifacts_data:
-        # Gemini returns [ymin, xmin, ymax, xmax] normalized 0-1
-        ymin, xmin, ymax, xmax = item['box_2d']
-        
-        # Convert to pixel coordinates
-        x1 = int(xmin * w)
-        y1 = int(ymin * h)
-        x2 = int(xmax * w)
-        y2 = int(ymax * h)
-        
-        # Create mask: White areas are what we want to remove
-        # We add a small padding (dilating) to ensure the edge of the UI element is covered
-        pad = 5 
-        cv2.rectangle(mask, (x1 - pad, y1 - pad), (x2 + pad, y2 + pad), 255, -1)
-        found_boxes = True
 
-    if not found_boxes:
-        print("Gemini detected artifacts but failed to return valid boxes.")
-        return
+    mask = np.zeros((h, w), dtype=np.uint8)     # final mask
+    rectangles = []                             # list of (x1, y1, x2, y2)
+    drawing = False
+    x0, y0 = -1, -1
 
-    # Inpaint: Replaces marked pixels using neighboring pixels (Telea algorithm)
-    # radius=3 is usually good for thin lines/text
-    cleaned_img = cv2.inpaint(img, mask, 3, cv2.INPAINT_TELEA)
+    def redraw():
+        """Redraw display image and mask overlay from rectangles."""
+        nonlocal img_disp, mask
+        img_disp = img.copy()
+        mask[:] = 0
+        for (x1, y1, x2, y2) in rectangles:
+            cv2.rectangle(img_disp, (x1, y1), (x2, y2), (0, 255, 0), 1)
+            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+
+    def mouse_callback(event, x, y, flags, param):
+        nonlocal drawing, x0, y0, img_disp
+
+        if event == cv2.EVENT_LBUTTONDOWN:
+            drawing = True
+            x0, y0 = x, y
+
+        elif event == cv2.EVENT_MOUSEMOVE and drawing:
+            # show live rectangle
+            redraw()
+            cv2.rectangle(img_disp, (x0, y0), (x, y), (0, 0, 255), 1)
+
+        elif event == cv2.EVENT_LBUTTONUP:
+            drawing = False
+            x1, y1 = x0, y0
+            x2, y2 = x, y
+            # normalize coords
+            x1, x2 = sorted([x1, x2])
+            y1, y2 = sorted([y1, y2])
+            # avoid zero-area rectangles
+            if abs(x2 - x1) > 1 and abs(y2 - y1) > 1:
+                rectangles.append((x1, y1, x2, y2))
+            redraw()
+
+    cv2.namedWindow("Rect Mask Editor", cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback("Rect Mask Editor", mouse_callback)
+
+    print("Instructions:")
+    print("  Left drag: draw rectangle over crossmark")
+    print("  u: undo last rectangle")
+    print("  c: clear all")
+    print("  s: save mask and exit")
+    print("  q or ESC: quit without saving")
+
+    while True:
+        cv2.imshow("Rect Mask Editor", img_disp)
+        cv2.imshow("Current Mask", mask)
+        key = cv2.waitKey(10) & 0xFF
+
+        if key == ord('s'):
+            cv2.imwrite(output_mask_path, mask)
+            print(f"Mask saved to {output_mask_path}")
+            break
+        elif key == ord('u'):
+            if rectangles:
+                rectangles.pop()
+                redraw()
+        elif key == ord('c'):
+            rectangles.clear()
+            redraw()
+        elif key in [ord('q'), 27]:  # 'q' or ESC
+            break
+
+    cv2.destroyAllWindows()
+    return Image.fromarray(mask)
+
+
+
+
+# Load pre-trained inpainting model
+pipe = StableDiffusionInpaintPipeline.from_pretrained(
+    "runwayml/stable-diffusion-inpainting", 
+    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+)
+pipe = pipe.to("cuda" if torch.cuda.is_available() else "cpu")
+
+def inpaint_ultrasound(image_path, mask_path, prompt="clean medical ultrasound image without artifacts", strength=0.99, guidance_scale=7.5):
+    """
+    Inpaint ultrasound image to remove crossmarks.
     
-    # Verify size is unchanged
-    assert cleaned_img.shape == img.shape, "Error: Image size changed!"
+    Args:
+    - image_path: Path to original ultrasound PNG/JPG.
+    - mask_path: Path to mask (white=area to inpaint, black=keep) same size as image.
+    - prompt: Describes desired fill (e.g., "homogeneous breast tissue ultrasound").
+    - strength: Denoising strength (0.8-1.0 for strong artifacts).
+    - guidance_scale: Prompt adherence (5-10).
     
-    # Save output
-    cv2.imwrite(output_path, cleaned_img)
-    print(f"Cleaned image saved to {output_path}")
+    Returns: Inpainted PIL Image.
+    """
+    init_image = Image.open(image_path).convert("RGB").resize((512, 512))
+    mask_image = Image.open(mask_path).convert("L").resize((512, 512))
+    
+    result = pipe(
+        prompt=prompt,
+        image=init_image,
+        mask_image=mask_image,
+        num_inference_steps=50,
+        strength=strength,
+        guidance_scale=guidance_scale
+    ).images[0]
+    
+    return result
 
-# ==========================================
-# Example Usage
-# ==========================================
 
-# Create a dummy image or use a real path
-# clean_ultrasound_image("patient_scan_001.jpg", "patient_scan_001_clean.jpg")
+
